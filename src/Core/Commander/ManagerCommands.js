@@ -31,6 +31,13 @@ function ManagerCommands(scene) {
     this.providers = {};
     this.history = null;
     this.eventsManager = new EventsManager();
+    this.maxConcurrentCommands = 16;
+    this.maxCommandsPerHost = 6;
+    this.counters = {
+        runningCommands: 0,
+        executedCommands: 0,
+        hostCommands: {}
+    };
 
     if (!scene)
         throw new Error("Cannot instantiate ManagerCommands without scene");
@@ -43,6 +50,7 @@ ManagerCommands.prototype.constructor = ManagerCommands;
 
 ManagerCommands.prototype.addCommand = function(command) {
     this.queueAsync.queue(command);
+    this.executeCommands();
 };
 
 
@@ -62,43 +70,82 @@ ManagerCommands.prototype.isFree = function() {
     return this.commandsLength() === 0;
 };
 
-ManagerCommands.prototype.runAllCommands = function() {
-
-
-    if (this.commandsLength() === 0) {
-        return Promise.resolve(0);
-    }
-
-    return Promise.all(this.arrayDeQueue(16))
-        .then(function() {
-            // if (this.commandsLength() <= 16)
-            this.scene.wait(1);
-            // else
-            //     this.scene.renderScene3D();
-            return this.runAllCommands();
-        }.bind(this));
+ManagerCommands.prototype.resetExecutedCommandsCount = function() {
+    this.counters.executedCommands = 0;
 };
 
-ManagerCommands.prototype.arrayDeQueue = function(number) {
+ManagerCommands.prototype.executeCommands = function() {
 
-    var nT = number === undefined ? this.queueAsync.length : number;
-
-    var arrayTasks = [];
-
-    while (this.queueAsync.length > 0 && arrayTasks.length < nT) {
-        var command = this.deQueue();
-
-        if (command) {
-            var layer = command.layer;
-            var provider = this.providers[layer.protocol];
-            if (provider) {
-                arrayTasks.push(provider.executeCommand(command));
+    var command;
+    var launchCommand = function(cmd) {
+        this.counters.runningCommands++;
+        var layer = cmd.layer;
+        var host;
+        if(layer.url) {
+            host = new URL(layer.url).host;
+            if(this.counters.hostCommands[host] === undefined) {
+                this.counters.hostCommands[host] = 1;
+            } else {
+                this.counters.hostCommands[host]++;
             }
         }
+
+        var commandEnd = function() {
+            this.counters.runningCommands--;
+            this.counters.executedCommands++;
+            if(host) {
+                this.counters.hostCommands[host]--;
+                if(this.counters.hostCommands[host] === 0) {
+                    this.counters.hostCommands[host] = undefined;
+                }
+            }
+            this.executeCommands();
+        }.bind(this);
+
+        var p = this.providers[layer.protocol];
+        if(p) {
+            var promise = p.executeCommand(cmd);
+            if(promise) {
+                promise.then(function() {
+                    commandEnd();
+                }.bind(this));
+            } else {
+                commandEnd();
+            }
+        } else {
+            commandEnd();
+        }
+    }.bind(this);
+
+    var skippedCommands = [];
+    // Launch awaiting commands until max concurrent command count is reached
+    while(this.counters.runningCommands != this.maxConcurrentCommands) {
+        command = this.deQueue();
+        if(command === undefined) {
+            break;
+        }
+
+        // Skip command if max commands per host is exceeded
+        var url = command.layer.url;
+        if(url) {
+            var host = new URL(url).host;
+            if(this.counters.hostCommands[host] !== undefined &&
+                this.maxCommandsPerHost <= this.counters.hostCommands[host]) {
+                skippedCommands.push(command);
+                continue;
+            }
+        }
+        launchCommand(command);
     }
 
-    return arrayTasks;
+    // Requeue skipped commands
+    for(var i = 0; i < skippedCommands.length; i++) {
+        this.queueAsync.queue(skippedCommands[i]);
+    }
+
+    return this.counters.runningCommands === 0 && this.counters.executedCommands === 0;
 };
+
 
 ManagerCommands.prototype.getProviders = function() {
     var p = [];
@@ -107,7 +154,8 @@ ManagerCommands.prototype.getProviders = function() {
         p.push(this.providers[protocol]);
     }
     return p;
-}
+};
+
 
 
 /**

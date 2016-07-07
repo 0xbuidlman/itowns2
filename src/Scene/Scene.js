@@ -27,9 +27,9 @@ import CustomEvent from 'custom-event';
 
 var instanceScene = null;
 var event = new CustomEvent('globe-built');
-var NO_SUBDIVISE = 0;
-var SUBDIVISE = 1;
-var CLEAN = 2;
+const NO_SUBDIVIDE = 0;
+const SUBDIVIDE = 1;
+const CLEAN = 2;
 
 function Scene(coordinate, ellipsoid, viewerDiv, debugMode, gLDebug) {
 
@@ -53,6 +53,10 @@ function Scene(coordinate, ellipsoid, viewerDiv, debugMode, gLDebug) {
     this.gfxEngine = c3DEngine(this,positionCamera,viewerDiv, debugMode,gLDebug);
     this.browserScene = new BrowseTree(this.gfxEngine);
     this.cap = new Capabilities();
+    this.needsUpdate = false;
+    this.lastUpdateTime = 0;
+    this.maxTimeWithNoUpdates = 200;
+    this.minCommandsBeforeUpdate = 16;
 
     this.time = 0;
     this.orbitOn = false;
@@ -97,31 +101,7 @@ Scene.prototype.size = function() {
     return this.ellipsoid.size;
 };
 
-/**
- *
- * @returns {undefined}
- */
-Scene.prototype.quadTreeRequest = function(quadtree, process) {
-
-    this.browserScene.browse(quadtree, this.currentCamera(), process, this.map.layersConfiguration, SUBDIVISE);
-    this.managerCommand.runAllCommands().then(function() {
-        if (this.managerCommand.isFree()) {
-            this.browserScene.browse(quadtree, this.currentCamera(), process, this.map.layersConfiguration, SUBDIVISE);
-            if (this.managerCommand.isFree()) {
-                this.browserScene.browse(quadtree, this.currentCamera(), process, this.map.layersConfiguration, CLEAN)
-                this.viewerDiv.dispatchEvent(event);
-
-            }
-        }
-
-    }.bind(this));
-
-    this.renderScene3D();
-
-};
-
-Scene.prototype.realtimeSceneProcess = function() {
-
+Scene.prototype.refreshView = function() {
     for (var l = 0; l < this.layers.length; l++) {
         var layer = this.layers[l].node;
         var process = this.layers[l].process;
@@ -129,13 +109,13 @@ Scene.prototype.realtimeSceneProcess = function() {
         for (var sl = 0; sl < layer.children.length; sl++) {
             var sLayer = layer.children[sl];
 
-            if (sLayer instanceof Quadtree)
-                this.browserScene.browse(sLayer, this.currentCamera(), process, this.map.layersConfiguration, NO_SUBDIVISE);
-            else if (sLayer instanceof MobileMappingLayer)
-                this.browserScene.updateMobileMappingLayer(sLayer, this.currentCamera());
-            else if (sLayer instanceof Layer)
-                this.browserScene.updateLayer(sLayer, this.currentCamera());
-
+            if (sLayer instanceof Quadtree) {
+                this.browserScene.browse(sLayer, this.currentCamera(), process, this.map.layersConfiguration, NO_SUBDIVIDE);
+            } else if (sLayer instanceof MobileMappingLayer) {
+                this.browserScene.updateMobileMappingLayer(sLayer,this.currentCamera());
+            } else if (sLayer instanceof Layer) {
+                this.browserScene.updateLayer(sLayer,this.currentCamera());
+            }
         }
     }
 };
@@ -149,15 +129,61 @@ Scene.prototype.updateScene3D = function() {
     this.gfxEngine.update();
 };
 
-Scene.prototype.wait = function(timeWait) {
+/**
+ * Notifies the scene it needs to be updated due to changes exterior to the
+ * scene itself (e.g. camera movement).
+ */
+Scene.prototype.notifyChange = function() {
+    this.needsUpdate = true;
+    // request new frame in case the rendering loop was on hold
+    // force rendering to ensure interactivity
+    requestAnimationFrame(function(timestamp) { this.step(timestamp, true); }.bind(this));
+};
 
-    var waitTime = timeWait ? timeWait : 20;
+/**
+ * Browse layers to check for new data to be loaded
+ * Subdivide layers and clean them if necessary
+ */
+Scene.prototype.updateLayers = function() {
+    var quadtree = this.layers[0].node.tiles;
+    var process = this.layers[0].process;
 
-    this.realtimeSceneProcess();
+    this.browserScene.browse(quadtree,this.currentCamera(), process, this.map.layersConfiguration, SUBDIVIDE);
+    var allDone = this.managerCommand.executeCommands();
+    if(allDone) {
+        this.browserScene.browse(quadtree,this.currentCamera(), process, this.map.layersConfiguration, CLEAN);
+        this.viewerDiv.dispatchEvent(event);
+        this.needsUpdate = false;
+    }
+};
 
-    window.clearInterval(this.timer);
+Scene.prototype.step = function(timestamp, interactive) {
 
-    this.timer = window.setTimeout(this.quadTreeRequest.bind(this), waitTime, this.layers[0].node.tiles, this.layers[0].process);
+    var commandsExecuted = this.managerCommand.counters.executedCommands !== 0;
+    var minimalCommandsNumberExecuted = this.minCommandsBeforeUpdate <= this.managerCommand.counters.executedCommands;
+    var timeout = this.maxTimeWithNoUpdates < (timestamp - this.lastUpdateTime);
+    var noCommands = this.managerCommand.isFree() && this.managerCommand.counters.runningCommands === 0;
+
+    // update if scene is not in stable state yet and:
+    //  - no commands are queued yet, we must update the layers to create the commands
+    //  - a minimal amount of commands were executed: significant change happened, requiring an update
+    //  - too much time passed since last update and at least one command was executed (i.e. something changed)
+    if(this.needsUpdate && (noCommands || minimalCommandsNumberExecuted || (timeout && commandsExecuted))) {
+        // reset update indicators
+        this.managerCommand.resetExecutedCommandsCount();
+        this.lastUpdateTime = timestamp;
+
+        this.updateLayers();
+        this.renderScene3D();
+    } else if(interactive) {
+        // refresh layers rendering data
+        this.refreshView();
+        this.renderScene3D();
+    }
+
+    if(this.needsUpdate) {
+        requestAnimationFrame(this.step.bind(this));
+    }
 };
 
 /**
@@ -179,12 +205,10 @@ Scene.prototype.scene3D = function() {
  * @param node {[object Object]}
  */
 Scene.prototype.add = function(node, nodeProcess) {
-
     if (node instanceof Globe) {
         this.map = node;
         nodeProcess = nodeProcess || new NodeProcess(this.currentCamera(), node.ellipsoid);
         //this.quadTreeRequest(node.tiles, nodeProcess);
-
     }
 
     this.layers.push({
