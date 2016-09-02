@@ -319,13 +319,15 @@ function updateNodeElevation(quadtree, node, layersConfig, force) {
 
         // Decide which texture (level) to download
         let ancestor = null;
-        if (currentElevation < 0) {
+        if (currentElevation === 0) {
             // no texture: use elevation texture from parent
             let parentElevationLevel = node.parent.materials[RendererConstant.FINAL].getLevelLayerColor(0, 0);
             if (parentElevationLevel > 0) {
                 ancestor = node.getNodeAtLevel(parentElevationLevel);
             }
-
+        } else if (currentElevation < 0) {
+            // got an empty texture, no need to retry
+            return Promise.resolve(node);
         } else {
             var targetLevel = chooseNextLevelToFetch(layer.updateStrategy.type, node.level, currentElevation, layer.updateStrategy.options);
 
@@ -351,11 +353,11 @@ function updateNodeElevation(quadtree, node, layersConfig, force) {
                 }
 
                 // what-if terrain is null?
-                if (terrain && terrain.texture) {
+                if (terrain.texture) {
                     terrain.texture.level = (ancestor || node).level;
                 }
 
-                if (terrain && terrain.max === undefined) {
+                if (terrain.max === undefined) {
                     terrain.min = (ancestor || node).bbox.bottom();
                     terrain.max = (ancestor || node).bbox.top();
                 }
