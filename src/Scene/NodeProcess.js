@@ -370,6 +370,13 @@ NodeProcess.prototype.SSE = function(node, camera, params) {
         }
     }
 
+    if (this.pendingSubdivision && !node.childrenLoaded()) {
+        // refine children
+        for (var i=0; i<this.children.length; i++) {
+            this.refineNodeLayers(this.children[i], camera, params);
+        }
+    }
+
     // display children if possible
     node.setDisplayed(!hidden);
 };
