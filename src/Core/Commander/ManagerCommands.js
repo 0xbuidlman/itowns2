@@ -34,12 +34,14 @@ function _instanciateQueue() {
 
             if (!p) throw new Error('arg');
             return p.then(
-                function() {
+                function(result) {
                     this.counters.executing--;
+                    cmd.resolve(result);
                     this.counters.executed++;
                 }.bind(this),
-                function() {
+                function(err) {
                     this.counters.executing--;
+                    cmd.reject(err);
                     this.counters.executed++;
                     this.counters.failed++;
                 }.bind(this)
